@@ -23,9 +23,9 @@ module ActiveRecord
       def enable_memcache_querycache(options = {})
         if ActionController::Base.perform_caching && defined?(::Rails.cache) && ::Rails.cache.is_a?(ActiveSupport::Cache::MemCacheStore)
           options[:expires_in] ||= 90.minutes
-          self.enableMemcacheQueryForModels[ActiveRecord::Base.send(:class_name_of_active_record_descendant, self).to_s] = options
+          self.enableMemcacheQueryForModels[self.base_class.name] = options
         else
-          warning = "[Query memcached WARNING] Disabled for #{ActiveRecord::Base.send(:class_name_of_active_record_descendant, self)} -- Memcache for QueryCache is not enabled for this model because caching is not turned on, Rails.cache is not defined, or cache engine is not mem_cache_store"
+          warning = "[Query memcached WARNING] Disabled for #{self.base_class.name} -- Memcache for QueryCache is not enabled for this model because caching is not turned on, Rails.cache is not defined, or cache engine is not mem_cache_store"
           ActiveRecord::Base.logger.error warning
         end
       end
@@ -70,38 +70,62 @@ module ActiveRecord
       attr_accessor :memcache_query_cache_options
     end
 
-    class MysqlAdapter < AbstractAdapter
-      
-      # alias_method_chain for expiring cache if necessary
-      def execute_with_clean_query_cache(*args)
-        return execute_without_clean_query_cache(*args) unless self.memcache_query_cache_options && query_cache_enabled
-        sql = args[0].strip
-        if sql =~ /^(INSERT|UPDATE|ALTER|DROP|DELETE)/i
-          # can only modify one table at a time...so stop after matching the first table name
-          table_name = ActiveRecord::Base.extract_table_names(sql).first
-          ActiveRecord::Base.increase_version!(table_name)
+    if ActiveRecord::ConnectionAdapters.const_defined?( 'Mysql2Adapter' )
+      class Mysql2Adapter < AbstractAdapter
+        
+        # alias_method_chain for expiring cache if necessary
+        def execute_with_clean_query_cache(*args)
+          return execute_without_clean_query_cache(*args) unless self.memcache_query_cache_options && query_cache_enabled
+          sql = args[0].strip
+          if sql =~ /^(INSERT|UPDATE|ALTER|DROP|DELETE)/i
+            # can only modify one table at a time...so stop after matching the first table name
+            table_name = ActiveRecord::Base.extract_table_names(sql).first
+            ActiveRecord::Base.increase_version!(table_name)
+          end
+          execute_without_clean_query_cache(*args)
         end
-        execute_without_clean_query_cache(*args)
-      end
 
-      alias_method_chain :execute, :clean_query_cache
-      
+        alias_method_chain :execute, :clean_query_cache
+        
+      end
     end
     
-    class PostgreSQLAdapter < AbstractAdapter
-
-      def execute_with_clean_query_cache(*args)
-        return execute_without_clean_query_cache(*args) unless self.memcache_query_cache_options && query_cache_enabled
-        sql = args[0].strip
-        if sql =~ /^(INSERT|UPDATE|ALTER|DROP|DELETE)/i
-          table_name = ActiveRecord::Base.extract_table_names(sql).first
-          ActiveRecord::Base.increase_version!(table_name)
+    if ActiveRecord::ConnectionAdapters.const_defined?( 'MysqlAdapter' )
+      class MysqlAdapter < AbstractAdapter
+        
+        # alias_method_chain for expiring cache if necessary
+        def execute_with_clean_query_cache(*args)
+          return execute_without_clean_query_cache(*args) unless self.memcache_query_cache_options && query_cache_enabled
+          sql = args[0].strip
+          if sql =~ /^(INSERT|UPDATE|ALTER|DROP|DELETE)/i
+            # can only modify one table at a time...so stop after matching the first table name
+            table_name = ActiveRecord::Base.extract_table_names(sql).first
+            ActiveRecord::Base.increase_version!(table_name)
+          end
+          execute_without_clean_query_cache(*args)
         end
-        execute_without_clean_query_cache(*args)
+
+        alias_method_chain :execute, :clean_query_cache
+        
       end
-      
-      alias_method_chain :execute, :clean_query_cache
-      
+    end
+
+    if ActiveRecord::ConnectionAdapters.const_defined?( 'PostgreSQLAdapter' )
+      class PostgreSQLAdapter < AbstractAdapter
+
+        def execute_with_clean_query_cache(*args)
+          return execute_without_clean_query_cache(*args) unless self.memcache_query_cache_options && query_cache_enabled
+          sql = args[0].strip
+          if sql =~ /^(INSERT|UPDATE|ALTER|DROP|DELETE)/i
+            table_name = ActiveRecord::Base.extract_table_names(sql).first
+            ActiveRecord::Base.increase_version!(table_name)
+          end
+          execute_without_clean_query_cache(*args)
+        end
+        
+        alias_method_chain :execute, :clean_query_cache
+        
+      end
     end
     
     module QueryCache
@@ -129,42 +153,35 @@ module ActiveRecord
       end
     
       private
-    
-      def cache_sql(sql)
-        # priority order:
-        #  - if in @query_cache (memory of local app server) we prefer this
-        #  - else if exists in Memcached we prefer that
-        #  - else perform query in database and save memory caches
+      
+      def cache_sql(sql, binds)
         result =
-          if (query_cache_enabled || self.memcache_query_cache_options) && @query_cache.has_key?(sql)
-            log_info(sql, "CACHE", 0.0)
-            @query_cache[sql]
-          elsif self.memcache_query_cache_options && cached_result = ::Rails.cache.read(query_key(sql), self.memcache_query_cache_options)
-            log_info(sql, "MEMCACHE", 0.0)
-            @query_cache[sql] = cached_result
+          if @query_cache[sql].has_key?(binds)
+            ActiveSupport::Notifications.instrument("sql.active_record",
+                                                    :sql => sql, :name => "CACHE", :connection_id => self.object_id)
+            @query_cache[sql][binds]
+          elsif self.memcache_query_cache_options && (cached_result = ::Rails.cache.fetch(query_key(sql)))
+            ActiveSupport::Notifications.instrument("sql.active_record",
+                                                    :sql => sql, :name => "MEMCACHE : #{query_key(sql)}", :connection_id => self.object_id)
+            @query_cache[sql][binds] = cached_result
           else
             query_result = yield
-            @query_cache[sql] = query_result if query_cache_enabled || self.memcache_query_cache_options            
-            ::Rails.cache.write(query_key(sql), query_result, self.memcache_query_cache_options) if self.memcache_query_cache_options
-            query_result
+            if self.memcache_query_cache_options
+              ::Rails.cache.write(query_key(sql), query_result, self.memcache_query_cache_options) 
+            end
+            @query_cache[sql][binds] = query_result
           end
-    
-        if Array === result
-          result.collect { |row| row.dup }
-        else
-          result.duplicable? ? result.dup : result
-        end
-      rescue TypeError
-        result
+
+        result.collect { |row| row.dup }
       end
-    
+      
       # Transforms a sql query into a valid key for Memcache
       def query_key(sql)
         table_names = ActiveRecord::Base.extract_table_names(sql)
         # version_number is the sum of the global version number and all 
         # the version numbers of each table
         version_number = get_cache_version # global version 
-        table_names.each { |table_name| version_number += get_cache_version(table_name) }
+        table_names.each { |table_name| version_number += get_cache_version(table_name).to_s }
         "#{version_number}_#{Digest::MD5.hexdigest(sql)}"
       end
     
@@ -179,9 +196,9 @@ module ActiveRecord
           @cache_version[key_class_version] = version if @cache_version
           version
         else
-          @cache_version[key_class_version] = 0 if @cache_version
-          ::Rails.cache.write(key_class_version, 0)
-          0
+          @cache_version[key_class_version] = "0" if @cache_version
+          ::Rails.cache.write(key_class_version, "0")
+          "0"
         end
       end
     

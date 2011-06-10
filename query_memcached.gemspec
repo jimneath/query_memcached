@@ -2,7 +2,7 @@
 
 Gem::Specification.new do |s|
   s.name = %q{query_memcached}
-  s.version = "2.2.2"
+  s.version = "2.3.0"
 
   s.required_rubygems_version = Gem::Requirement.new(">= 0") if s.respond_to? :required_rubygems_version=
   s.authors = ["Fernando Blat"]
@@ -19,7 +19,6 @@ Gem::Specification.new do |s|
      "Rakefile",
      "TODO",
      "init.rb",
-     "lib/extensions/lock.rb",
      "lib/query_memcached.rb",
      "test/query_memcached_test.rb",
      "test/testing_app/README",
