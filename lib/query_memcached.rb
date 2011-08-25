@@ -158,11 +158,11 @@ module ActiveRecord
         result =
           if @query_cache[sql].has_key?(binds)
             ActiveSupport::Notifications.instrument("sql.active_record",
-                                                    :sql => sql, :name => "CACHE", :connection_id => self.object_id)
+                                                    :sql => sql, :name => "Cache", :connection_id => self.object_id)
             @query_cache[sql][binds]
           elsif self.memcache_query_cache_options && (cached_result = ::Rails.cache.fetch(query_key(sql)))
             ActiveSupport::Notifications.instrument("sql.active_record",
-                                                    :sql => sql, :name => "MEMCACHE : #{query_key(sql)}", :connection_id => self.object_id)
+                                                    :sql => sql, :name => "Memcached", :connection_id => self.object_id)
             @query_cache[sql][binds] = cached_result
           else
             query_result = yield
